@@ -88,7 +88,7 @@ env:
 
 jobs:
   build-kernel:
-    name: Build Kernel for ${{ env.DEVICE_NAME }}
+    name: Build Kernel for
     runs-on: ubuntu-latest
     env:
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"

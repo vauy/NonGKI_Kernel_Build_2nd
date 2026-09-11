@@ -1,1 +1,218 @@
-123456
+name: Build Redmi Note 9 (Dual-Boot AOSP & HyperOS)
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+env:
+  # ============ 设备信息 ============
+  DEVICE_NAME: "redmi_note9"
+  DEVICE_CODENAME: "cannon"
+
+  # ============ 编译工具链 ============
+  CUSTOM_CMDS: "CLANG_TRIPLE=aarch64-linux-gnu-"
+  EXTRA_CMDS: "LD=ld.lld LLVM=1 LLVM_IAS=1"
+
+  # ⚠️ 替换为你实际找到的 cannon 4.14 内核源码
+  KERNEL_SOURCE: "https://github.com/你的内核源码仓库.git"
+  KERNEL_BRANCH: "你的分支名"
+
+  CLANG_SOURCE: "https://github.com/llvm/llvm-project/releases/download/llvmorg-19.1.7/LLVM-19.1.7-Linux-X64.tar.xz"
+  CLANG_BRANCH: ""
+
+  GCC_GNU: false
+  GCC_64_SOURCE: "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9.git"
+  GCC_64_BRANCH: "android12L-release"
+  GCC_32_SOURCE: "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/x86/x86_64-linux-android-4.9.git"
+  GCC_32_BRANCH: "android12L-release"
+
+  DEFCONFIG_SOURCE: ""
+  DEFCONFIG_NAME: "cannon_defconfig"
+  DEFCONFIG_ORIGIN_IMAGE: ""
+  DEFCONFIG_FROM_BOOT: false
+
+  # ============ KernelSU Next ============
+  KERNELSU_SOURCE: "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh"
+  KERNELSU_BRANCH: "next"
+  KERNELSU_METHOD: "shell"
+
+  KERNELSU_AUTO_GET: "false"
+  KERNELSU_AUTO_FORK: "rsuntk"
+
+  # ============ SUSFS ============
+  SUSFS_ENABLE: true
+  SUSFS_FIXED: true
+
+  # ============ AnyKernel3 打包 ============
+  AK3_SOURCE: "https://github.com/osm0sis/AnyKernel3.git"
+  AK3_BRANCH: "master"
+  PACK_METHOD: "Anykernel3"
+
+  BOOT_SOURCE: ""
+  NEED_DTBO: false
+  NEED_SAFE_DTBO: false
+
+  ROM_TEXT: "dual_aosp_hyperos"
+
+  PYTHON_VERSION: "3"
+
+  # ============ 补丁集 ============
+  PATCHES_SOURCE: "JackA1ltman/NonGKI_Kernel_Patches"
+  PATCHES_BRANCH: "mi_kernel"
+
+  SUSFS_FOLDER_FIXED: "redmi_note_9_aosp_a16_414"
+  SUSFS_PATCH_FIXED: "susfs_fixed"
+
+  # ============ 可选功能 ============
+  REKERNEL_ENABLE: "false"
+  BASEBAND_GUARD_ENABLE: "false"
+  BASEBAND_GUARD_BOOT: "false"
+
+  HOOK_METHOD: "syscall"
+  HOOK_OLDER: "false"
+  KERNEL_PATCH: "false"
+
+  KPM_ENABLE: "false"
+  KPM_INLINE: "false"
+  KPM_KPATCH_NEXT: "false"
+  KPM_PATCH_SOURCE: "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/refs/heads/main/kpm/patch_linux"
+
+  HIDE_STUFF: "true"
+
+  GENERATE_DTB: "false"
+  GENERATE_CHIP: "mediatek"
+
+  BUILD_DEBUGGER: "false"
+  SKIP_PATCH: "true"
+
+  BUILD_OTHER_CONFIG: "false"
+  MERGE_CONFIG_FILES: ""
+  FREE_MORE_SPACE: "false"
+
+jobs:
+  build-kernel:
+    name: Build Dual-Boot Kernel for ${{ env.DEVICE_NAME }}
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+
+    steps:
+      - name: ⏰ Checkout repository
+        uses: actions/checkout@v4
+
+      # ============ 克隆 fuck-bpf（Android 16 BPF 兼容） ============
+      - name: Clone fuck-bpf
+        run: git clone https://github.com/techyminati/fuck-bpf.git $GITHUB_WORKSPACE/fuck-bpf
+
+      - name: ⌛️ Compilation environment preparation
+        uses: ./.github/workflows/build-env
+
+      - name: ⚙️ Get necessary tools
+        uses: ./.github/workflows/build-ready
+
+      # ============ KernelSU Next 集成 ============
+      - name: 🧬 Integrate KernelSU Next
+        run: |
+          cd $GITHUB_WORKSPACE/device_kernel
+          curl -LSs "${{ env.KERNELSU_SOURCE }}" | bash -s legacy
+          echo "KernelSU Next integrated (legacy mode for 4.14 kernel)"
+
+      # ============ SUSFS 补丁 ============
+      - name: 🪝 Patch Kernel of SUSFS
+        uses: ./.github/workflows/patch-susfs
+
+      # ============ no-kprobe 补丁 ============
+      - name: 🔗 Patch for no-kprobe
+        uses: ./.github/workflows/patch-no-kprobe
+
+      # ============ 额外内核配置 ============
+      - name: 🪛 Extra Kernel Options
+        run: |
+          cd $GITHUB_WORKSPACE/device_kernel
+          echo "CONFIG_KSU_KPROBES_HOOK=n" >> ./arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
+          echo "CONFIG_KSU_LSM_SECURITY_HOOKS=y" >> ./arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
+
+      # ============ BPF 补丁（Android 16） ============
+      - name: 🧬 Patch Kernel for BPF (Android 16)
+        run: |
+          cd $GITHUB_WORKSPACE/device_kernel
+
+          # 方案一：源码级补丁 (fuck-bpf)
+          if [ -f "$GITHUB_WORKSPACE/fuck-bpf/apply.sh" ]; then
+            echo "Applying fuck-bpf patches..."
+            cd $GITHUB_WORKSPACE/fuck-bpf
+            ./apply.sh --mb || true
+            cd $GITHUB_WORKSPACE/device_kernel
+          fi
+
+          # 方案二：二进制级补丁 (mtk-bpf-patcher)
+          pip3 install --upgrade git+https://github.com/R0rt1z2/mtk-bpf-patcher
+          if [ -f "./arch/arm64/boot/Image" ]; then
+            mtk-bpf-patcher ./arch/arm64/boot/Image ./arch/arm64/boot/Image.patched
+            mv ./arch/arm64/boot/Image.patched ./arch/arm64/boot/Image
+          elif [ -f "./out/arch/arm64/boot/Image" ]; then
+            mtk-bpf-patcher ./out/arch/arm64/boot/Image ./out/arch/arm64/boot/Image.patched
+            mv ./out/arch/arm64/boot/Image.patched ./out/arch/arm64/boot/Image
+          else
+            echo "No Image file found, skipping mtk-bpf-patcher."
+          fi
+
+      # ============ 可选补丁 ============
+      - name: 🧰 Patch Kernel of Re:Kernel
+        if: env.REKERNEL_ENABLE == 'true'
+        uses: ./.github/workflows/patch-rekernel
+
+      - name: 🔒 Patch Kernel of Baseband Guard
+        if: env.BASEBAND_GUARD_ENABLE == 'true'
+        uses: ./.github/workflows/patch-baseband-guard
+
+      - name: 🔧 Patch Hide Stuff
+        if: env.HIDE_STUFF == 'true'
+        uses: ./.github/workflows/patch-hide-stuff
+
+      # ============ 编译内核 ============
+      - name: 🚀 Build Process
+        uses: ./.github/workflows/build-process
+
+      # ============ 双版本打包 ============
+      - name: 🔩 Pack Process (双版本输出)
+        run: |
+          cd $GITHUB_WORKSPACE/device_kernel
+
+          # 克隆 AnyKernel3
+          git clone ${{ env.AK3_SOURCE }} -b ${{ env.AK3_BRANCH }} ak3
+          cd ak3
+          rm -f *placeholder
+
+          # 复制内核 Image
+          cp ../out/arch/arm64/boot/Image .
+
+          # 复制 dtb/dtbo（如果存在）
+          [ -f ../out/arch/arm64/boot/dtb.img ] && cp ../out/arch/arm64/boot/dtb.img .
+          [ -f ../out/arch/arm64/boot/dtbo.img ] && cp ../out/arch/arm64/boot/dtbo.img .
+
+          # ---- 打包 AOSP 版本 ----
+          cp anykernel.sh anykernel.sh.aosp
+          sed -i 's/^cmdline=.*/cmdline="bootopt=64S3,32N2,64N2 androidboot.selinux=enforcing buildvariant=user"/' anykernel.sh
+          zip -r9 ../kernel-aosp-a16.zip * -x .git README.md *placeholder
+          echo "✅ AOSP kernel package created."
+
+          # ---- 打包 HyperOS 版本 ----
+          cp anykernel.sh.aosp anykernel.sh
+          sed -i 's/^cmdline=.*/cmdline="bootopt=64S3,32N2,64N2 androidboot.selinux=permissive buildvariant=userdebug"/' anykernel.sh
+          zip -r9 ../kernel-hyperos-a16.zip * -x .git README.md *placeholder
+          echo "✅ HyperOS kernel package created."
+
+      # ============ 上传产物 ============
+      - name: ✏️ Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-artifacts-cannon
+          path: |
+            device_kernel/kernel-aosp-a16.zip
+            device_kernel/kernel-hyperos-a16.zip
+            device_kernel/out/arch/arm64/boot/Image
+            device_kernel/out/arch/arm64/boot/dtb.img
+            device_kernel/out/arch/arm64/boot/dtbo.img

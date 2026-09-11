@@ -1,4 +1,4 @@
-name: Build Redmi Note 9 (Dual-Boot AOSP & HyperOS)
+name: Build Redmi Note 9 (AOSP & HyperOS)
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ env:
   DEVICE_NAME: "redmi_note9"
   DEVICE_CODENAME: "cannon"
 
-  # ============ 补充 build-process / pack-process 需要的变量 ============
+  # ============ build-process / pack-process 必需变量 ============
   KERNEL_ARCH: "arm64"
   CURLX: "curl -L"
   UPLOADNAME: "cannon_a16"
@@ -20,26 +20,31 @@ env:
   CUSTOM_CMDS: "CLANG_TRIPLE=aarch64-linux-gnu-"
   EXTRA_CMDS: "LD=ld.lld LLVM=1 LLVM_IAS=1"
 
-  KERNEL_SOURCE: "https://github.com/你的内核源码仓库.git"
-  KERNEL_BRANCH: "你的分支名"
+  # ============ 内核源码（已确认） ============
+  KERNEL_SOURCE: "https://github.com/GTian5418/android_kernel_xiaomi_cannon.git"
+  KERNEL_BRANCH: "lineage-20"
+  DEFCONFIG_NAME: "cannon_defconfig"
+  DEFCONFIG_SOURCE: ""
+  DEFCONFIG_ORIGIN_IMAGE: ""
+  DEFCONFIG_FROM_BOOT: false
 
+  # ============ Clang 工具链 ============
   CLANG_SOURCE: "https://github.com/llvm/llvm-project/releases/download/llvmorg-19.1.7/LLVM-19.1.7-Linux-X64.tar.xz"
   CLANG_BRANCH: ""
 
+  # ============ GCC 工具链 ============
   GCC_GNU: false
   GCC_64_SOURCE: "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9.git"
   GCC_64_BRANCH: "android12L-release"
   GCC_32_SOURCE: "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/x86/x86_64-linux-android-4.9.git"
   GCC_32_BRANCH: "android12L-release"
 
-  DEFCONFIG_NAME: "cannon_defconfig"
-  DEFCONFIG_FROM_BOOT: false
-
   # ============ KernelSU Next ============
   KERNELSU_SOURCE: "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh"
   KERNELSU_BRANCH: "next"
   KERNELSU_METHOD: "shell"
   KERNELSU_AUTO_GET: "false"
+  KERNELSU_AUTO_FORK: "rsuntk"
 
   # ============ SUSFS ============
   SUSFS_ENABLE: true
@@ -50,6 +55,10 @@ env:
   AK3_SOURCE: "https://github.com/osm0sis/AnyKernel3.git"
   AK3_BRANCH: "master"
   ROM_TEXT: "aosp_a16"
+  BOOT_SOURCE: ""
+  NEED_DTBO: false
+  NEED_SAFE_DTBO: false
+  PYTHON_VERSION: "3"
 
   # ============ 补丁集 ============
   PATCHES_SOURCE: "JackA1ltman/NonGKI_Kernel_Patches"
@@ -67,6 +76,7 @@ env:
   KPM_ENABLE: "false"
   KPM_INLINE: "false"
   KPM_KPATCH_NEXT: "false"
+  KPM_PATCH_SOURCE: "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/refs/heads/main/kpm/patch_linux"
   HIDE_STUFF: "true"
   GENERATE_DTB: "false"
   GENERATE_CHIP: "mediatek"
@@ -74,6 +84,7 @@ env:
   SKIP_PATCH: "true"
   BUILD_OTHER_CONFIG: "false"
   MERGE_CONFIG_FILES: ""
+  FREE_MORE_SPACE: "false"
 
 jobs:
   build-kernel:
@@ -88,46 +99,68 @@ jobs:
       - name: ⏰ Checkout repository
         uses: actions/checkout@v4
 
+      # ============ 克隆 fuck-bpf ============
       - name: Clone fuck-bpf
         run: git clone https://github.com/techyminati/fuck-bpf.git $GITHUB_WORKSPACE/fuck-bpf
 
+      # ============ 编译环境准备 ============
       - name: ⌛️ Compilation environment preparation
         uses: ./.github/workflows/build-env
 
       - name: ⚙️ Get necessary tools
         uses: ./.github/workflows/build-ready
 
+      # ============ 获取内核源码 ============
+      - name: 📥 Clone Kernel Source
+        run: |
+          git clone --depth=1 -b ${{ env.KERNEL_BRANCH }} ${{ env.KERNEL_SOURCE }} $GITHUB_WORKSPACE/device_kernel
+
+      # ============ KernelSU Next 集成 ============
       - name: 🧬 Integrate KernelSU Next
         run: |
           cd $GITHUB_WORKSPACE/device_kernel
           curl -LSs "${{ env.KERNELSU_SOURCE }}" | bash -s legacy
+          echo "✅ KernelSU Next integrated (legacy mode for 4.14 kernel)"
 
+      # ============ SUSFS 补丁 ============
       - name: 🪝 Patch Kernel of SUSFS
         uses: ./.github/workflows/patch-susfs
 
+      # ============ no-kprobe 补丁 ============
       - name: 🔗 Patch for no-kprobe
         uses: ./.github/workflows/patch-no-kprobe
 
+      # ============ 额外内核配置 ============
       - name: 🪛 Extra Kernel Options
         run: |
           cd $GITHUB_WORKSPACE/device_kernel
           echo "CONFIG_KSU_KPROBES_HOOK=n" >> ./arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
           echo "CONFIG_KSU_LSM_SECURITY_HOOKS=y" >> ./arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
 
+      # ============ BPF 补丁（Android 16） ============
       - name: 🧬 Patch Kernel for BPF (Android 16)
         run: |
           cd $GITHUB_WORKSPACE/device_kernel
+
+          # 方案一：源码级补丁 (fuck-bpf)
           if [ -f "$GITHUB_WORKSPACE/fuck-bpf/apply.sh" ]; then
+            echo "Applying fuck-bpf patches..."
             cd $GITHUB_WORKSPACE/fuck-bpf
             ./apply.sh --mb || true
             cd $GITHUB_WORKSPACE/device_kernel
           fi
+
+          # 方案二：二进制级补丁 (mtk-bpf-patcher)
           pip3 install --upgrade git+https://github.com/R0rt1z2/mtk-bpf-patcher
           if [ -f "./out/arch/arm64/boot/Image" ]; then
             mtk-bpf-patcher ./out/arch/arm64/boot/Image ./out/arch/arm64/boot/Image.patched
             mv ./out/arch/arm64/boot/Image.patched ./out/arch/arm64/boot/Image
+            echo "✅ mtk-bpf-patcher applied."
+          else
+            echo "⚠️ No Image file found, skipping mtk-bpf-patcher (will be applied after build)."
           fi
 
+      # ============ 可选补丁 ============
       - name: 🧰 Patch Kernel of Re:Kernel
         if: env.REKERNEL_ENABLE == 'true'
         uses: ./.github/workflows/patch-rekernel
@@ -140,12 +173,35 @@ jobs:
         if: env.HIDE_STUFF == 'true'
         uses: ./.github/workflows/patch-hide-stuff
 
+      # ============ 编译内核 ============
       - name: 🚀 Build Process
         uses: ./.github/workflows/build-process
 
+      # ============ 编译后再打一次 BPF 补丁（保险） ============
+      - name: 🧬 Post-Build BPF Patch
+        run: |
+          cd $GITHUB_WORKSPACE/device_kernel
+          IMG=""
+          if [ -f "./out/arch/arm64/boot/Image" ]; then
+            IMG="./out/arch/arm64/boot/Image"
+          elif [ -f "./out/arch/arm64/boot/Image.gz" ]; then
+            gunzip -c ./out/arch/arm64/boot/Image.gz > ./out/arch/arm64/boot/Image
+            IMG="./out/arch/arm64/boot/Image"
+          fi
+
+          if [ -n "$IMG" ]; then
+            mtk-bpf-patcher "$IMG" "${IMG}.patched" || true
+            [ -f "${IMG}.patched" ] && mv "${IMG}.patched" "$IMG"
+            echo "✅ Post-build BPF patch applied."
+          else
+            echo "⚠️ No Image found after build."
+          fi
+
+      # ============ 打包（用你的 pack-process 子工作流） ============
       - name: 🔩 Pack Process
         uses: ./.github/workflows/pack-process
 
+      # ============ 上传产物 ============
       - name: ✏️ Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -153,6 +209,7 @@ jobs:
           path: |
             device_kernel/*.zip
             device_kernel/out/arch/arm64/boot/Image
-            device_kernel/out/arch/arm64/boot/Image.gz-dtb
+            device_kernel/out/arch/arm64/boot/Image.gz
             device_kernel/out/arch/arm64/boot/dtb.img
             device_kernel/out/arch/arm64/boot/dtbo.img
+            device_kernel/out/arch/arm64/boot/Image.gz-dtb
